@@ -95,4 +95,13 @@ export class WorkspaceInviteManager {
   public getInviteArray(): IProfile[] {
     return [...this.inviteeProfiles.values()];
   }
+
+  /**
+   * Get the profile of a user from an ndn name
+   * @param name ndn name
+   * @returns User profile or undefined
+   */
+  public getProfile(name: string): IProfile | undefined {
+    return this.inviteeProfiles.get(name);
+  }
 }

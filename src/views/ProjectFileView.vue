@@ -4,70 +4,78 @@
     They can likely be reused if the user is switching files. -->
     <LoadingSpinner v-if="loading" class="absolute-center" text="Loading your file ..." />
 
-    <Suspense v-if="contentCode">
-      <div class="code">
-        <CodeEditor
-          class="editor"
-          :ytext="contentCode"
+    <template v-else>
+      <!-- File Header -->
+      <FileHeader :filename="contentBasename" :collaborators="collaborators" />
+
+      <!-- File Content -->
+      <div class="file-content">
+        <Suspense v-if="contentCode">
+          <div class="code">
+            <CodeEditor
+              class="editor"
+              :ytext="contentCode"
+              :basename="contentBasename"
+              :awareness="awareness!"
+            />
+            <PdfViewer
+              v-if="contentIsLatex"
+              class="result"
+              :basename="`${proj?.name}.pdf`"
+              :pdf="resultPdf"
+              has-compile
+              :compiling="resultIsCompiling"
+              :error="resultError"
+              @compile="compileLatex"
+            />
+            <MarkdownViewer
+              v-if="contentIsMarkdown"
+              class="result"
+              :basename="contentBasename"
+              :ytext="contentCode"
+            />
+            <RevealSlidesViewer
+              v-if="contentIsRevealJS"
+              class="result"
+              :basename="contentBasename"
+              :ytext="contentCode"
+            />
+          </div>
+
+          <template #fallback>
+            <LoadingSpinner class="absolute-center" text="Loading code editor ..." />
+          </template>
+        </Suspense>
+
+        <Suspense v-else-if="contentExcalidrawElements !== null && contentExcalidrawFiles !== null">
+          <ExcalidrawEditor
+            :yeles="contentExcalidrawElements"
+            :yfiles="contentExcalidrawFiles"
+            :name="contentBasename"
+          />
+
+          <template #fallback>
+            <LoadingSpinner class="absolute-center" text="Loading excalidraw editor ..." />
+          </template>
+        </Suspense>
+
+        <Suspense v-else-if="contentMilk">
+          <MilkdownEditor :yxml="contentMilk" :path="filepath" :awareness="awareness!" />
+
+          <template #fallback>
+            <LoadingSpinner class="absolute-center" text="Loading document editor ..." />
+          </template>
+        </Suspense>
+
+        <BlobView
+          v-else-if="contentBlob"
+          :key="contentBlob.name"
+          :version="contentBlob"
+          :path="filepath"
           :basename="contentBasename"
-          :awareness="awareness!"
-        />
-        <PdfViewer
-          v-if="contentIsLatex"
-          class="result"
-          :basename="`${proj?.name}.pdf`"
-          :pdf="resultPdf"
-          has-compile
-          :compiling="resultIsCompiling"
-          :error="resultError"
-          @compile="compileLatex"
-        />
-        <MarkdownViewer
-          v-if="contentIsMarkdown"
-          class="result"
-          :basename="contentBasename"
-          :ytext="contentCode"
-        />
-        <RevealSlidesViewer
-          v-if="contentIsRevealJS"
-          class="result"
-          :basename="contentBasename"
-          :ytext="contentCode"
         />
       </div>
-
-      <template #fallback>
-        <LoadingSpinner class="absolute-center" text="Loading code editor ..." />
-      </template>
-    </Suspense>
-
-    <Suspense v-else-if="contentExcalidrawElements !== null && contentExcalidrawFiles !== null">
-      <ExcalidrawEditor
-        :yeles="contentExcalidrawElements"
-        :yfiles="contentExcalidrawFiles"
-        :name="contentBasename"
-      />
-
-      <template #fallback>
-        <LoadingSpinner class="absolute-center" text="Loading excalidraw editor ..." />
-      </template>
-    </Suspense>
-
-    <Suspense v-else-if="contentMilk">
-      <MilkdownEditor :yxml="contentMilk" :path="filepath" :awareness="awareness!" />
-
-      <template #fallback>
-        <LoadingSpinner class="absolute-center" text="Loading document editor ..." />
-      </template>
-    </Suspense>
-
-    <BlobView
-      v-else-if="contentBlob"
-      :key="contentBlob.name"
-      :version="contentBlob"
-      :path="filepath"
-      :basename="contentBasename"
-    />
+    </template>
   </div>
 </template>
 
@@ -88,6 +96,7 @@ import * as awareProto from 'y-protocols/awareness.js';
 import type { ExcalidrawElementYMap, ExcalidrawFilesYMap } from '@/services/excalidraw-types';
 
 import LoadingSpinner from '@/components/LoadingSpinner.vue';
+import FileHeader from '@/components/files/FileHeader.vue';
 const CodeEditor = defineAsyncComponent({
   loader: () => import('@/components/files/CodeEditor.vue'),
 });
@@ -111,11 +120,13 @@ import * as utils from '@/utils';
 import { Toast } from '@/utils/toast';
 
 import type { WorkspaceProj } from '@/services/workspace-proj';
-import type { IBlobVersion } from '@/services/types';
+import type { AwarenessLocalState, IBlobVersion, IProfile } from '@/services/types';
 import RevealSlidesViewer from '@/components/files/RevealSlidesViewer.vue';
 
 const route = useRoute();
 const router = useRouter();
+
+const wksp = shallowRef(null as Workspace | null);
 
 const loading = ref(true);
 const filename = computed(() => route.params.filename as string[]);
@@ -142,10 +153,34 @@ const resultPdf = shallowRef<Uint8Array<ArrayBuffer> | null>(null);
 const resultIsCompiling = ref(false);
 const resultError = ref(String());
 
+const collaborators = ref<IProfile[]>([]);
+
 onMounted(create);
 watch(filename, create);
 watch(() => route.params.project, create);
 onUnmounted(destroy);
+
+// Update collaborators when awareness changes
+watch(awareness, (newAwareness) => {
+  if (newAwareness) {
+    // Initial update
+    collaborators.value = getCollaborators();
+
+    // Listen for future updates
+    const updateCollaborators = () => {
+      collaborators.value = getCollaborators();
+    };
+
+    newAwareness.on('update', updateCollaborators);
+
+    // Clean up listener when awareness changes
+    return () => {
+      newAwareness.off('update', updateCollaborators);
+    };
+  } else {
+    collaborators.value = [];
+  }
+}, { immediate: true });
 
 async function create() {
   // If something fails, we should destroy these
@@ -160,18 +195,18 @@ async function create() {
   try {
     loading.value = true;
 
-    const wksp = await Workspace.setupOrRedir(router);
-    if (!wksp) throw new Error('Workspace not found');
+    wksp.value = await Workspace.setupOrRedir(router);
+    if (!wksp.value) throw new Error('Workspace not found');
 
     let newProj;
 
-    if (wksp.proj.active) newProj = wksp.proj.active;
+    if (wksp.value.proj.active) newProj = wksp.value.proj.active;
     else {
       // No active project, try to get it from the URL
       const projName = router.currentRoute.value.params.project as string;
       if (!projName) throw new Error('No project name provided');
 
-      newProj = await wksp.proj.get(projName);
+      newProj = await wksp.value.proj.get(projName);
       await newProj.activate();
     }
 
@@ -183,7 +218,7 @@ async function create() {
     if (!metadata) throw new Error(`File not found: ${filepath.value}`);
 
     // Update tab name
-    document.title = utils.formTabName(wksp.metadata.label);
+    document.title = utils.formTabName(wksp.value.metadata.label);
 
     // Get file path attributes
     const basename = filename.value[filename.value.length - 1];
@@ -285,6 +320,19 @@ async function compileLatex() {
     resultIsCompiling.value = false;
   }
 }
+
+// Get all collaborators from awareness
+function getCollaborators() {
+  if (!awareness.value) return [];
+
+  const collaborators: IProfile[] = [];
+  awareness.value.getStates().forEach((state) => {
+      const profile = wksp.value?.invite.getProfile((state as AwarenessLocalState).user.name);
+      collaborators.push(profile!);
+  });
+
+  return collaborators;
+}
 </script>
 
 <style scoped lang="scss">
@@ -292,6 +340,15 @@ async function compileLatex() {
   position: relative;
   height: 100%;
   width: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.file-content {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 .code {
